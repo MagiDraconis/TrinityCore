@@ -20,8 +20,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 1. Platz schaffen (Absolut notwendig für Multi-Arch Builds)
-      - name: Free Disk Space (Manual)
+      # 1. Free Disk Space
+      # Comment: TrinityCore compilation creates massive intermediate files.
+      # We must clear space on the GitHub runner to avoid "No space left on device" errors.
+      - name: Free Disk Space
         run: |
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /usr/share/dotnet
@@ -30,23 +32,22 @@ jobs:
           sudo rm -rf "$AGENT_TOOLSDIRECTORY"
           df -h
 
-      # 2. Swap erstellen (Wichtig, QEMU braucht RAM Overhead)
+      # 2. Create Swap Space
+      # Comment: Linking the server binaries requires significant RAM.
+      # Creating a 6GB swap file prevents the compiler from being killed by OOM (Out Of Memory).
       - name: Create Swap Space
         run: |
-          sudo fallocate -l 6G /swapfile   # Erhöht auf 6GB zur Sicherheit
+          sudo fallocate -l 6G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
           sudo swapon --show
 
-      # 3. NEU: QEMU Emulator einrichten (für ARM64 Support)
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      # 4. Docker Buildx einrichten
+      # 3. Set up Docker Buildx
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # 4. Login to GitHub Container Registry
       - name: Log into registry ${{ env.REGISTRY }}
         uses: docker/login-action@v3
         with:
@@ -54,24 +55,30 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # 5. Extract Metadata (Tags & Labels)
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # Comment: Configure tagging behaviour.
+          # - type=ref,event=branch: Generates a tag based on the branch name (e.g., :master).
+          # - type=raw,value=latest: Generates the :latest tag automatically if this is the default branch.
           tags: |
             type=ref,event=branch
-            type=sha,format=long
+            type=raw,value=latest,enable={{is_default_branch}}
 
-      # 5. Build starten mit BEIDEN Plattformen
+      # 6. Build and Push
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
-          # Hier ist die Magie: Wir bauen für beide Architekturen gleichzeitig
-          platforms: linux/amd64,linux/arm64
+          # Comment: We build only for AMD64 to ensure stability and speed.
+          # ARM64 emulation via QEMU often times out for large C++ projects like this.
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Comment: Use GitHub Actions caching to speed up subsequent builds
           cache-from: type=gha
           cache-to: type=gha,mode=max
