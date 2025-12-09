@@ -68,11 +68,11 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          # Comment: Configure tagging behaviour:
-          # - type=ref,event=branch: Creates a tag for the branch (e.g. :master)
-          # - type=raw,value=latest: Automatically adds :latest if this is the default branch
+          # Comment: Tagging configuration:
+          # 1. v1.0.X: Uses the GitHub Actions Run Number which increments by 1 on every build.
+          # 2. latest: Always points to the most recent successful build on the default branch.
           tags: |
-            type=ref,event=branch
+            type=raw,value=v1.0.${{ github.run_number }}
             type=raw,value=latest,enable={{is_default_branch}}
 
       # 6. Build and Push
@@ -81,7 +81,6 @@ jobs:
         with:
           context: .
           # Comment: Build targets for both standard servers (AMD64) and ARM devices (RPi/Apple Silicon).
-          # Warning: The ARM64 build via QEMU is very slow.
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
