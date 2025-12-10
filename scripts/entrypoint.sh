@@ -7,9 +7,9 @@ SQL_DIR="/opt/trinitycore/sql"
 DATA_DIR="/opt/trinitycore/data"
 
 # DB Zugangsdaten
-DB_HOST="db"
-DB_USER="root"
-DB_PASS="trinity"
+DB_HOST=${DB_HOST:-"db"}
+DB_USER=${DB_USER:-"root"}
+DB_PASS=${DB_PASS:-"trinity"}
 
 echo ">>> TrinityCore MASTER Entrypoint gestartet <<<"
 
