@@ -25,10 +25,9 @@ jobs:
       # Wir verwenden eine dedizierte Aktion, da diese deutlich mehr Müll entfernt (bis zu 25GB)
       # als manuelles Löschen und auch den AGENT_TOOLSDIRECTORY effektiver bereinigt.
       - name: 🧹 Maximiere Disk Space Freigabe
-        uses: jlumbroso/free-disk-space@v0.2.1
+        uses: jlumbroso/free-disk-space@v0.5.0 # Auf die aktuellste Version aktualisiert
         with:
           # Entfernt ALLE großen vorinstallierten Pakete, die nicht direkt benötigt werden.
-          # Wenn Sie z.B. Java (JDK) benötigen, entfernen Sie 'java: true'.
           android: true
           dotnet: true
           haskell: true
