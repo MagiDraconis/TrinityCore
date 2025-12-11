@@ -52,7 +52,7 @@ jobs:
       # Comment: Required for ARM64 linking overhead.
       - name: Create Swap Space
         run: |
-          sudo fallocate -l 5G /swapfile
+          sudo fallocate -l 3G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
