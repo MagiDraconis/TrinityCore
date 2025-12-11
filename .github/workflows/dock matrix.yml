@@ -1,4 +1,4 @@
-name: Docker Build Multi-Arch (Matrix)
+name: Docker Build and Push
 
 on:
   push:
@@ -7,23 +7,11 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  # Comment: IMAGE_NAME is removed here and defined dynamically below to ensure it is lowercase.
 
 jobs:
-  # --- JOB 1: BUILD PER PLATFORM ---
   build:
-    name: Build ${{ matrix.platform }}
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            # Helps to identify the artifact later
-            slug: amd64
-          - platform: linux/arm64
-            slug: arm64
-
     permissions:
       contents: read
       packages: write
@@ -32,26 +20,44 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 1. Standard Cleanup (Sufficient since we split the load)
-      # Comment: Since each job runs on a fresh machine, standard cleanup is enough.
-      - name: Free Disk Space
+      # --- FIX: FORCE LOWERCASE IMAGE NAME ---
+      # Comment: Docker registries require lowercase repository names.
+      # We convert the GitHub repository name (e.g., 'MagiDraconis/TrinityCore') to lowercase.
+      - name: Downcase Image Name
+        run: |
+          echo "IMAGE_NAME=${GITHUB_REPOSITORY,,}" >> ${GITHUB_ENV}
+        env:
+          GITHUB_REPOSITORY: '${{ github.repository }}'
+
+      # 1. Free Disk Space (Manual)
+      # Comment: Essential for Multi-Arch builds to prevent disk space exhaustion.
+      # Added aggressive cleanup for hosted tools to prevent the runner logs from filling up.
+      - name: Free Disk Space (Manual)
         run: |
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          sudo rm -rf /opt/hostedtoolcache
+          sudo docker image prune --all --force
           df -h
 
-      # 2. Swap Space (Still needed for ARM64 linking)
+      # 2. Create Swap Space
+      # Comment: QEMU requires RAM overhead. Using 6GB as per your working config.
       - name: Create Swap Space
         run: |
           sudo fallocate -l 6G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
+          sudo swapon --show
 
+      # 3. Set up QEMU (for ARM64 Support)
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
+      # 4. Set up Docker Buildx
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -67,85 +73,20 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-
-      # 3. Build and Push (By Digest)
-      # Comment: We build and push ONLY the image for the current matrix platform.
-      # We output the digest so we can merge them later.
-      - name: Build and push by digest
-        id: build
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          platforms: ${{ matrix.platform }}
-          push: true
-          # Comment: We push the image using the digest to avoid race conditions with tags
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=build-${{ matrix.slug }}
-          cache-to: type=gha,mode=max,scope=build-${{ matrix.slug }}
-          # Comment: We do not tag 'latest' yet, we just push the blob
-          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true
-
-      # 4. Export Digest
-      # Comment: Save the digest to a file so the Merge job can read it
-      - name: Export digest
-        run: |
-          mkdir -p /tmp/digests
-          digest="${{ steps.build.outputs.digest }}"
-          touch "/tmp/digests/${digest#sha256:}"
-      
-      - name: Upload digest
-        uses: actions/upload-artifact@v4
-        with:
-          name: digests-${{ matrix.slug }}
-          path: /tmp/digests/*
-          if-no-files-found: error
-          retention-days: 1
-
-  # --- JOB 2: MERGE MANIFESTS ---
-  merge:
-    runs-on: ubuntu-latest
-    needs: build
-    permissions:
-      contents: read
-      packages: write
-    
-    steps:
-      - name: Download digests
-        uses: actions/download-artifact@v4
-        with:
-          path: /tmp/digests
-          pattern: digests-*
-          merge-multiple: true
-      
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      
-      - name: Log into registry ${{ env.REGISTRY }}
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          # Comment: Define your final tags here
+          # Comment: Using your preferred tagging scheme: v1.0.RUN_NUMBER + latest
           tags: |
             type=raw,value=v1.0.${{ github.run_number }}
             type=raw,value=latest,enable={{is_default_branch}}
 
-      # 5. Create Manifest List
-      # Comment: This step combines the AMD64 and ARM64 images into a single 'latest' tag.
-      # It runs very fast because no compiling happens here.
-      - name: Create manifest list and push
-        working-directory: /tmp/digests
-        run: |
-          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
-      
-      - name: Inspect image
-        run: |
-          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+      # 5. Build and Push
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          # Comment: Building for both architectures as requested
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
