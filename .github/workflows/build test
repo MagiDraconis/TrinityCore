@@ -1,0 +1,98 @@
+name: Docker Build and Push
+
+on:
+  push:
+    branches: [ "master" ]
+  workflow_dispatch:
+  pull_request:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 1. MAXIMALE SPEICHERPLATZ-FREIGABE (Disk-Speicher)
+      # Wir verwenden eine dedizierte Aktion, da diese deutlich mehr Müll entfernt (bis zu 25GB)
+      # als manuelles Löschen und auch den AGENT_TOOLSDIRECTORY effektiver bereinigt.
+      - name: 🧹 Maximiere Disk Space Freigabe
+        uses: jlumbroso/free-disk-space@v0.2.1
+        with:
+          # Entfernt ALLE großen vorinstallierten Pakete, die nicht direkt benötigt werden.
+          # Wenn Sie z.B. Java (JDK) benötigen, entfernen Sie 'java: true'.
+          android: true
+          dotnet: true
+          haskell: true
+          go: true
+          # Der AGENT_TOOLSDIRECTORY wird von der Aktion ebenfalls bereinigt.
+
+      # Überprüfung, wie viel Speicherplatz freigegeben wurde
+      - name: Überprüfe verfügbaren Disk Space
+        run: df -h
+
+      # 2. SWAP SPACE ERSTELLEN (RAM-Erweiterung/virtueller Speicher)
+      # Dies ist besonders wichtig für QEMU/Multi-Arch-Builds, da QEMU RAM-Overhead erzeugt.
+      - name: 📈 Create Swap Space (6GB für RAM-Intensität)
+        run: |
+          sudo fallocate -l 6G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          sudo swapon --show
+          free -h # Überprüfen des neuen Speichers
+
+      # 3. Set up QEMU (for ARM64 Support)
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      # 4. Set up Docker Buildx
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log into registry ${{ env.REGISTRY }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=v1.0.${{ github.run_number }}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # 5. Build and Push
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # 6. WICHTIGE NACHBEREITUNG (Disk-Speicher freigeben)
+      # Entfernt temporäre Images, Container, Build-Caches und Volumes, die durch den Build-Prozess erstellt wurden.
+      - name: 🗑️ Docker System Bereinigung
+        if: always() # Führt diesen Schritt auch im Falle eines Fehlers im Build aus
+        run: |
+          echo "Bereinige temporäre Docker-Artefakte..."
+          # -a: Löscht alle nicht verwendeten Objekte
+          # -f: Erzwingt die Löschung ohne Bestätigung
+          docker system prune -a -f
+          df -h
