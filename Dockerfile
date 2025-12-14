@@ -4,7 +4,7 @@ FROM ubuntu:24.04 AS builder
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install dependencies
-# Added: ninja-build (faster compilation), libjemalloc-dev (better memory management)
+# Matches linux-build.yml logic + Docker specifics
 RUN apt-get update && apt-get install -y \
     git clang cmake make gcc g++ \
     libmariadb-dev libssl-dev \
@@ -22,10 +22,7 @@ RUN git clone -b master --depth 1 https://github.com/TrinityCore/TrinityCore.git
 WORKDIR /usr/src/TrinityCore/build
 
 # Configure CMake
-# Optimisations based on linux-build.yml:
-# -GNinja: Uses Ninja build system (faster than Make)
-# -DUSE_COREPCH=1 & -DUSE_SCRIPTPCH=1: Uses Precompiled Headers (speeds up build significantly)
-# -DENABLE_JEMALLOC=1: Uses jemalloc for better memory handling
+# Aligned with linux-build.yml settings (Ninja, PCH, Jemalloc)
 RUN cmake ../ -DCMAKE_INSTALL_PREFIX=/opt/trinitycore \
     -DCMAKE_C_COMPILER=clang \
     -DCMAKE_CXX_COMPILER=clang++ \
@@ -39,8 +36,6 @@ RUN cmake ../ -DCMAKE_INSTALL_PREFIX=/opt/trinitycore \
     -DCMAKE_BUILD_TYPE=Release
 
 # Compile and Install
-# Using 'ninja install' instead of 'make'
-# Cleaning up build directory immediately to save disk space
 RUN ninja install \
     && rm -rf /usr/src/TrinityCore/build
 
@@ -54,7 +49,7 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install runtime dependencies
-# Added: libjemalloc2 (runtime for jemalloc), libboost-regex (critical fix)
+# CRITICAL FIX: Added libboost-regex1.83.0 and libboost-locale1.83.0 based on linux-build.yml
 RUN apt-get update && apt-get install -y \
     libmariadb3 \
     libssl3t64 \
@@ -64,11 +59,13 @@ RUN apt-get update && apt-get install -y \
     libboost-program-options1.83.0 \
     libboost-iostreams1.83.0 \
     libboost-regex1.83.0 \
+    libboost-locale1.83.0 \
     libreadline8t64 \
     libncurses6 \
     libjemalloc2 \
     netcat-openbsd iputils-ping \
     mariadb-client curl jq p7zip-full unzip \
+    gosu \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/trinitycore
