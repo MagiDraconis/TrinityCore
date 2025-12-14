@@ -3,13 +3,15 @@ FROM ubuntu:24.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install build dependencies
+# Install dependencies
+# Matches linux-build.yml logic + Docker specifics
 RUN apt-get update && apt-get install -y \
     git clang cmake make gcc g++ \
     libmariadb-dev libssl-dev \
     libbz2-dev libreadline-dev libncurses-dev \
     libboost-all-dev p7zip-full \
     libmariadb-dev-compat gettext curl unzip \
+    ninja-build libjemalloc-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /usr/src
@@ -20,20 +22,22 @@ RUN git clone -b master --depth 1 https://github.com/TrinityCore/TrinityCore.git
 WORKDIR /usr/src/TrinityCore/build
 
 # Configure CMake
+# Aligned with linux-build.yml settings (Ninja, PCH, Jemalloc)
 RUN cmake ../ -DCMAKE_INSTALL_PREFIX=/opt/trinitycore \
     -DCMAKE_C_COMPILER=clang \
     -DCMAKE_CXX_COMPILER=clang++ \
+    -GNinja \
     -DWITH_WARNINGS=0 \
     -DTOOLS=1 \
     -DSCRIPTS=static \
+    -DUSE_COREPCH=1 \
+    -DUSE_SCRIPTPCH=1 \
+    -DENABLE_JEMALLOC=1 \
     -DCMAKE_BUILD_TYPE=Release
 
 # Compile and Install
-RUN make -j$(nproc) && make install
-
-# Comment: Critical step! We delete the huge build directory BEFORE copying the SQL files.
-# This prevents the "No space left on device" error during the Docker build.
-RUN rm -rf /usr/src/TrinityCore/build
+RUN ninja install \
+    && rm -rf /usr/src/TrinityCore/build
 
 # Copy SQL files
 RUN cp -r /usr/src/TrinityCore/sql /opt/trinitycore/sql
@@ -45,6 +49,7 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install runtime dependencies
+# CRITICAL FIX: Added libboost-regex1.83.0 and libboost-locale1.83.0 based on linux-build.yml
 RUN apt-get update && apt-get install -y \
     libmariadb3 \
     libssl3t64 \
@@ -53,10 +58,14 @@ RUN apt-get update && apt-get install -y \
     libboost-thread1.83.0 \
     libboost-program-options1.83.0 \
     libboost-iostreams1.83.0 \
+    libboost-regex1.83.0 \
+    libboost-locale1.83.0 \
     libreadline8t64 \
     libncurses6 \
+    libjemalloc2 \
     netcat-openbsd iputils-ping \
     mariadb-client curl jq p7zip-full unzip \
+    gosu \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/trinitycore
@@ -64,7 +73,7 @@ WORKDIR /opt/trinitycore
 # Copy compiled files
 COPY --from=builder /opt/trinitycore /opt/trinitycore
 
-# Backup config files (Fix for empty volume issue)
+# Backup config files
 RUN mkdir -p /opt/trinitycore/etc-backup && \
     cp -r /opt/trinitycore/etc/* /opt/trinitycore/etc-backup/
 
