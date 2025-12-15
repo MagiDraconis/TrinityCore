@@ -16,7 +16,6 @@ echo ">>> TrinityCore MASTER Entrypoint started <<<"
 echo "Target Database Host: $DB_HOST"
 
 # --- 1. SSL CERTIFICATES ---
-# Generate certs if missing
 if [ ! -f "$ETC_DIR/bnetserver.cert.pem" ] || [ ! -f "$ETC_DIR/bnetserver.key.pem" ]; then
     echo "Generating SSL certificates..."
     openssl req -new -newkey rsa:4096 -days 3650 -nodes -x509 \
@@ -26,7 +25,6 @@ if [ ! -f "$ETC_DIR/bnetserver.cert.pem" ] || [ ! -f "$ETC_DIR/bnetserver.key.pe
         2>/dev/null
     chmod 644 "$ETC_DIR/bnetserver.cert.pem"
     chmod 600 "$ETC_DIR/bnetserver.key.pem"
-    echo "Certificates created in $ETC_DIR"
 fi
 
 # --- 2. CONFIG RESTORE ---
@@ -37,23 +35,30 @@ if [ -d "$BACKUP_DIR" ]; then
     fi
 fi
 
-# --- 3. CONFIG HELPER FUNCTIONS ---
-# Regex fix: allows whitespace at start of line
+# --- 3. CONFIG HELPER FUNCTIONS (AGGRESSIVE MODE) ---
+
+# Delete the old key and append the new one at the end of the file.
+# This avoids regex matching issues with spaces/comments.
 set_config_string() {
     local file=$1; local key=$2; local value=$3
     if [ -f "$file" ]; then
-        sed -i "s|^\s*$key\s*=.*|$key = \"$value\"|g" "$file"
+        # Delete existing line (including comments)
+        sed -i "/^\s*#\?\s*$key\s*=/d" "$file"
+        # Append new value
+        echo "$key = \"$value\"" >> "$file"
     fi
 }
 
 set_config_int() {
     local file=$1; local key=$2; local value=$3
     if [ -f "$file" ]; then
-        sed -i "s|^\s*$key\s*=.*|$key = $value|g" "$file"
+        sed -i "/^\s*#\?\s*$key\s*=/d" "$file"
+        echo "$key = $value" >> "$file"
     fi
 }
 
 # --- 4. CONFIG SETUP ---
+# Always refresh config files from .dist if they are missing
 for conf in bnetserver worldserver; do
     if [ ! -f "$ETC_DIR/$conf.conf" ] && [ -f "$ETC_DIR/$conf.conf.dist" ]; then
         cp "$ETC_DIR/$conf.conf.dist" "$ETC_DIR/$conf.conf"
@@ -64,9 +69,8 @@ echo "Configuring server settings..."
 
 # BNETSERVER CONFIG
 set_config_string "$ETC_DIR/bnetserver.conf" "LoginDatabaseInfo" "$DB_HOST;3306;$DB_USER;$DB_PASS;auth"
-# FIX: Force absolute paths for SSL certificates
-set_config_string "$ETC_DIR/bnetserver.conf" "SSLCertificate" "$ETC_DIR/bnetserver.cert.pem"
-set_config_string "$ETC_DIR/bnetserver.conf" "SSLKey"         "$ETC_DIR/bnetserver.key.pem"
+set_config_string "$ETC_DIR/bnetserver.conf" "SSLCertificate"    "$ETC_DIR/bnetserver.cert.pem"
+set_config_string "$ETC_DIR/bnetserver.conf" "SSLKey"            "$ETC_DIR/bnetserver.key.pem"
 
 # WORLDSERVER CONFIG
 set_config_string "$ETC_DIR/worldserver.conf" "LoginDatabaseInfo"     "$DB_HOST;3306;$DB_USER;$DB_PASS;auth"
@@ -88,15 +92,12 @@ echo "Database reachable."
 if ! mysql -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" -e "USE auth; SELECT 1 FROM realmlist LIMIT 1;" 2>/dev/null; then
     echo ">>> Database empty. Starting initial setup... <<<"
     if [ -d "$SQL_DIR" ]; then
-        # Create structure
         mysql -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" < "$SQL_DIR/create/create_mysql.sql" || true
         
-        # Import base
         mysql -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" auth < "$(find $SQL_DIR/base -name 'auth_database.sql')"
         mysql -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" characters < "$(find $SQL_DIR/base -name 'characters_database.sql')"
         mysql -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" world < "$(find $SQL_DIR/base -name 'world_database.sql')"
 
-        # Download TDB
         API_RESPONSE=$(curl -s https://api.github.com/repos/TrinityCore/TrinityCore/releases/latest)
         if echo "$API_RESPONSE" | jq -e . >/dev/null 2>&1; then
              LATEST_URL=$(echo "$API_RESPONSE" | jq -r '.assets[] | select(.name | startswith("TDB_full_") and (.name | contains("335") | not)) | .browser_download_url')
