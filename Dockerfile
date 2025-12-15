@@ -53,6 +53,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y \
     libmariadb3 \
     libssl3t64 \
+    openssl \
     libboost-system1.83.0 \
     libboost-filesystem1.83.0 \
     libboost-thread1.83.0 \
