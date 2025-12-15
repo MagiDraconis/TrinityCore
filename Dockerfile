@@ -49,7 +49,7 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install runtime dependencies
-# CRITICAL FIX: Added libboost-regex1.83.0 and libboost-locale1.83.0 based on linux-build.yml
+# CRITICAL FIX: Added comprehensive list of Boost runtime libraries to prevent "shared object not found" errors
 RUN apt-get update && apt-get install -y \
     libmariadb3 \
     libssl3t64 \
@@ -60,6 +60,9 @@ RUN apt-get update && apt-get install -y \
     libboost-iostreams1.83.0 \
     libboost-regex1.83.0 \
     libboost-locale1.83.0 \
+    libboost-chrono1.83.0 \
+    libboost-atomic1.83.0 \
+    libboost-date-time1.83.0 \
     libreadline8t64 \
     libncurses6 \
     libjemalloc2 \
