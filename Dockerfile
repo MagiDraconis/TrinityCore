@@ -88,6 +88,11 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 RUN groupadd -r trinity && useradd -r -g trinity trinity
 RUN chown -R trinity:trinity /opt/trinitycore
 
+# --- FIX: SYMLINK FÜR DB-UPDATER ---
+# Erstellt den Ordner /usr/src und verlinkt TrinityCore dorthin,
+# damit der Server seine SQL-Dateien am "alten" Ort findet.
+RUN mkdir -p /usr/src && ln -s /opt/trinitycore /usr/src/TrinityCore
+
 EXPOSE 3724 8085
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
