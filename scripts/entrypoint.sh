@@ -18,6 +18,15 @@ echo "=========================================="
 echo "Database Host: $DB_HOST"
 echo "Server Mode: $1"
 
+# --- 0. SYMLINK FIX (SAFETY NET) ---
+# Falls der Symlink im Image fehlt, erstellen wir ihn hier
+if [ ! -d "/usr/src/TrinityCore" ]; then
+    echo "[0/9] Creating symlink for DB Updater..."
+    mkdir -p /usr/src
+    ln -s /opt/trinitycore /usr/src/TrinityCore
+    echo "  ✓ Symlink created"
+fi
+
 # --- 1. RESTORE CLEAN CONFIG FILES ---
 echo "[1/9] Restoring clean config templates..."
 if [ -d "$BACKUP_DIR" ]; then
