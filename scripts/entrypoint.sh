@@ -18,24 +18,15 @@ echo "=========================================="
 echo "Database Host: $DB_HOST"
 echo "Server Mode: $1"
 
-# --- 0. SYMLINK FIX (SAFETY NET) ---
-# Falls der Symlink im Image fehlt, erstellen wir ihn hier
-if [ ! -d "/usr/src/TrinityCore" ]; then
-    echo "[0/9] Creating symlink for DB Updater..."
-    mkdir -p /usr/src
-    ln -s /opt/trinitycore /usr/src/TrinityCore
-    echo "  ✓ Symlink created"
-fi
-
 # --- 1. RESTORE CLEAN CONFIG FILES ---
-echo "[1/9] Restoring clean config templates..."
+echo "[1/7] Restoring clean config templates..."
 if [ -d "$BACKUP_DIR" ]; then
     cp -f "$BACKUP_DIR"/*.conf.dist "$ETC_DIR/" 2>/dev/null || true
     echo "  ✓ Config templates restored"
 fi
 
 # --- 2. GENERATE CONFIG FILES FROM .DIST ---
-echo "[2/9] Generating config files..."
+echo "[2/7] Generating config files..."
 for conf in bnetserver worldserver; do
     if [ -f "$ETC_DIR/$conf.conf.dist" ]; then
         cp -f "$ETC_DIR/$conf.conf.dist" "$ETC_DIR/$conf.conf"
@@ -46,7 +37,7 @@ for conf in bnetserver worldserver; do
 done
 
 # --- 3. SSL CERTIFICATES ---
-echo "[3/9] Checking SSL certificates..."
+echo "[3/7] Checking SSL certificates..."
 if [ ! -f "$ETC_DIR/bnetserver.cert.pem" ] || [ ! -f "$ETC_DIR/bnetserver.key.pem" ]; then
     echo "  → Generating new SSL certificates..."
     openssl req -new -newkey rsa:4096 -days 3650 -nodes -x509 \
@@ -76,107 +67,140 @@ set_config_int() {
     echo "${key} = ${value}" >> "$file"
 }
 
-# --- 5. CONFIGURE BNETSERVER ---
-echo "[4/9] Configuring bnetserver..."
+# --- 5. CONFIGURE SERVERS ---
+echo "[4/7] Configuring servers..."
 
+# BNETSERVER
 set_config_string "$ETC_DIR/bnetserver.conf" "LoginDatabaseInfo" "${DB_HOST};3306;${DB_USER};${DB_PASS};auth"
 set_config_string "$ETC_DIR/bnetserver.conf" "BindIP" "0.0.0.0"
 set_config_string "$ETC_DIR/bnetserver.conf" "CertificatesFile" "${ETC_DIR}/bnetserver.cert.pem"
 set_config_string "$ETC_DIR/bnetserver.conf" "PrivateKeyFile" "${ETC_DIR}/bnetserver.key.pem"
 
-# FIX: Tell updater where SQL files are
-set_config_string "$ETC_DIR/bnetserver.conf" "SourceDirectory" "/opt/trinitycore"
-
-echo "  ✓ Bnetserver configured"
-
-# --- 6. CONFIGURE WORLDSERVER ---
-echo "[5/9] Configuring worldserver..."
-
+# WORLDSERVER - Database connections
 set_config_string "$ETC_DIR/worldserver.conf" "LoginDatabaseInfo"     "${DB_HOST};3306;${DB_USER};${DB_PASS};auth"
 set_config_string "$ETC_DIR/worldserver.conf" "WorldDatabaseInfo"     "${DB_HOST};3306;${DB_USER};${DB_PASS};world"
 set_config_string "$ETC_DIR/worldserver.conf" "CharacterDatabaseInfo" "${DB_HOST};3306;${DB_USER};${DB_PASS};characters"
 set_config_string "$ETC_DIR/worldserver.conf" "HotfixDatabaseInfo"    "${DB_HOST};3306;${DB_USER};${DB_PASS};hotfixes"
-set_config_string "$ETC_DIR/worldserver.conf" "DataDir"               "${DATA_DIR}"
 
-# FIX: Tell updater where SQL files are
+# WORLDSERVER - Paths and auto-update settings
+set_config_string "$ETC_DIR/worldserver.conf" "DataDir" "${DATA_DIR}"
 set_config_string "$ETC_DIR/worldserver.conf" "SourceDirectory" "/opt/trinitycore"
 
+# Enable automatic database updates (as per TrinityCore documentation)
 set_config_int "$ETC_DIR/worldserver.conf" "Updates.EnableDatabases" "1"
 set_config_int "$ETC_DIR/worldserver.conf" "Updates.AutoSetup" "1"
 
-echo "  ✓ Worldserver configured"
+echo "  ✓ Servers configured"
 
-# --- 7. WAIT FOR DATABASE ---
-echo "[6/9] Waiting for database connection..."
+# --- 6. WAIT FOR DATABASE ---
+echo "[5/7] Waiting for database connection..."
 MAX_TRIES=30
 COUNT=0
 while ! mysqladmin ping -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" --silent 2>/dev/null; do
     COUNT=$((COUNT+1))
-    if [ $COUNT -ge $MAX_TRIES ]; then echo "  ✗ Timeout"; exit 1; fi
+    if [ $COUNT -ge $MAX_TRIES ]; then 
+        echo "  ✗ Database timeout"
+        exit 1
+    fi
     sleep 2
 done
 echo "  ✓ Database is reachable"
 
-# --- 8. DATABASE INITIALIZATION ---
-echo "[7/9] Checking database status..."
-DB_EXISTS=$(mysql -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" -sN -e "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = 'auth';" 2>/dev/null || echo "0")
+# --- 7. PREPARE DATABASE (ONLY create_mysql.sql + TDB files) ---
+echo "[6/7] Preparing database..."
 
-if [ "$DB_EXISTS" = "0" ]; then
-    echo "  → Databases not found, creating..."
+# Check if auth database has the account table (sign of completed setup)
+TABLE_EXISTS=$(mysql -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" -sN -e \
+    "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'auth' AND TABLE_NAME = 'account';" \
+    2>/dev/null || echo "0")
+
+if [ "$TABLE_EXISTS" = "0" ]; then
+    echo "  → First-time setup detected"
+    
+    # 1. Create database users and empty databases (as per TrinityCore documentation)
     if [ -f "$SQL_DIR/create/create_mysql.sql" ]; then
-        mysql -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" < "$SQL_DIR/create/create_mysql.sql" 2>/dev/null || true
-        echo "  ✓ Databases created"
+        echo "  → Creating database structures..."
+        mysql -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" < "$SQL_DIR/create/create_mysql.sql" 2>&1 | grep -v "Warning" || true
+        echo "  ✓ Database structures created"
     fi
     
-    echo "  → Importing base schemas..."
-    for db_type in auth characters world; do
-        SQL_FILE=$(find "$SQL_DIR/base" -name "${db_type}_database.sql" 2>/dev/null | head -1)
-        if [ -n "$SQL_FILE" ]; then
-            mysql -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" "$db_type" < "$SQL_FILE"
-        fi
-    done
+    # 2. Download TDB files to BIN directory (as per TrinityCore documentation)
+    echo "  → Downloading TDB files to ${BIN_DIR}..."
+    API_RESPONSE=$(curl -s https://api.github.com/repos/TrinityCore/TrinityCore/releases/latest 2>/dev/null || echo "{}")
     
-    echo "  → Fetching latest TDB..."
-    API_RESPONSE=$(curl -s https://api.github.com/repos/TrinityCore/TrinityCore/releases/latest)
     if echo "$API_RESPONSE" | jq -e . >/dev/null 2>&1; then
-        LATEST_TDB=$(echo "$API_RESPONSE" | jq -r '.assets[] | select(.name | startswith("TDB_full_world_") and (.name | contains("335") | not)) | .browser_download_url' | head -1)
-        LATEST_HOTFIX=$(echo "$API_RESPONSE" | jq -r '.assets[] | select(.name | startswith("TDB_full_hotfixes_")) | .browser_download_url' | head -1)
+        # Get World TDB
+        LATEST_TDB=$(echo "$API_RESPONSE" | jq -r \
+            '.assets[] | select(.name | startswith("TDB_full_world_") and (.name | contains("335") | not)) | .browser_download_url' \
+            | head -1)
+        
+        # Get Hotfixes TDB
+        LATEST_HOTFIX=$(echo "$API_RESPONSE" | jq -r \
+            '.assets[] | select(.name | startswith("TDB_full_hotfixes_")) | .browser_download_url' \
+            | head -1)
         
         if [ -n "$LATEST_TDB" ] && [ "$LATEST_TDB" != "null" ]; then
-            echo "  → Downloading World TDB..."
-            curl -L -o /tmp/tdb.7z "$LATEST_TDB"
-            7z e /tmp/tdb.7z -o/tmp/tdb -y >/dev/null 2>&1
-            mysql -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" world < "$(find /tmp/tdb -name '*.sql' | head -1)"
-            rm -rf /tmp/tdb.7z /tmp/tdb
+            TDB_NAME=$(basename "$LATEST_TDB")
+            if [ ! -f "${BIN_DIR}/${TDB_NAME}" ]; then
+                echo "  → Downloading ${TDB_NAME}..."
+                curl -L -o "${BIN_DIR}/${TDB_NAME}" "$LATEST_TDB" 2>/dev/null
+                echo "  ✓ World TDB downloaded"
+            else
+                echo "  ✓ World TDB already exists"
+            fi
         fi
+        
         if [ -n "$LATEST_HOTFIX" ] && [ "$LATEST_HOTFIX" != "null" ]; then
-            echo "  → Downloading Hotfix TDB..."
-            curl -L -o /tmp/hotfix.7z "$LATEST_HOTFIX"
-            7z e /tmp/hotfix.7z -o/tmp/hotfix -y >/dev/null 2>&1
-            mysql -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" hotfixes < "$(find /tmp/hotfix -name '*.sql' | head -1)"
-            rm -rf /tmp/hotfix.7z /tmp/hotfix
+            HOTFIX_NAME=$(basename "$LATEST_HOTFIX")
+            if [ ! -f "${BIN_DIR}/${HOTFIX_NAME}" ]; then
+                echo "  → Downloading ${HOTFIX_NAME}..."
+                curl -L -o "${BIN_DIR}/${HOTFIX_NAME}" "$LATEST_HOTFIX" 2>/dev/null
+                echo "  ✓ Hotfixes TDB downloaded"
+            else
+                echo "  ✓ Hotfixes TDB already exists"
+            fi
         fi
     fi
+    
+    echo "  ✓ Database preparation complete"
+    echo ""
+    echo "  NOTE: Worldserver will now start and ask if you want to create databases."
+    echo "        The auto-setup is ENABLED, so it will import automatically."
+    echo ""
 else
-    echo "  ✓ Databases already exist"
+    echo "  ✓ Databases already populated (auth.account exists)"
 fi
 
-# --- 9. REALM CONFIGURATION ---
-echo "[8/9] Configuring realm..."
+# --- 8. REALM CONFIGURATION ---
+echo "[7/7] Configuring realm..."
 if [ "$1" = "bnetserver" ] || [ "$1" = "auth" ]; then
     REALM_IP=${TRINITY_REALM_IP:-"127.0.0.1"}
-    mysql -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" auth -e "UPDATE realmlist SET address = '$REALM_IP' WHERE id = 1;" 2>/dev/null || true
-    # If update failed (row doesn't exist), insert it
-    mysql -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" auth -e "INSERT IGNORE INTO realmlist (id, name, address, port, icon, flag, timezone, allowedSecurityLevel, population, gamebuild) VALUES (1, 'Trinity Master Docker', '$REALM_IP', 8085, 0, 0, 1, 0, 0, 57388);" 2>/dev/null || true
-    echo "  ✓ Realm IP set to $REALM_IP"
+    
+    # Try UPDATE first, then INSERT if needed
+    mysql -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" auth -e \
+        "UPDATE realmlist SET address = '$REALM_IP' WHERE id = 1;" 2>/dev/null || true
+    
+    mysql -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" auth -e \
+        "INSERT IGNORE INTO realmlist (id, name, address, localAddress, localSubnetMask, port, icon, flag, timezone, allowedSecurityLevel, population, gamebuild) 
+         VALUES (1, 'Trinity Master Docker', '$REALM_IP', '127.0.0.1', '255.255.255.0', 8085, 0, 0, 1, 0, 0, 57388);" \
+        2>/dev/null || true
+    
+    echo "  ✓ Realm configured (IP: $REALM_IP)"
 fi
 
-# --- 10. START SERVER ---
-echo "[9/9] Starting server process: $1"
+echo ""
+echo "=========================================="
+echo " Starting $1 server..."
+echo "=========================================="
+echo ""
+
+# --- 9. START SERVER ---
 if [ "$1" = "auth" ] || [ "$1" = "bnetserver" ]; then
     exec "$BIN_DIR/bnetserver"
 elif [ "$1" = "world" ]; then
     exec "$BIN_DIR/worldserver"
 else
-    exec "$@"
+    echo "Unknown server type: $1"
+    echo "Usage: $0 [bnetserver|world]"
+    exit 1
 fi
