@@ -86,7 +86,7 @@ set_config_string "$ETC_DIR/worldserver.conf" "HotfixDatabaseInfo"    "${DB_HOST
 set_config_string "$ETC_DIR/worldserver.conf" "DataDir" "${DATA_DIR}"
 set_config_string "$ETC_DIR/worldserver.conf" "SourceDirectory" "/opt/trinitycore"
 
-# Enable automatic database updates (as per TrinityCore documentation)
+# Enable automatic database setup (as per TrinityCore documentation)
 set_config_int "$ETC_DIR/worldserver.conf" "Updates.EnableDatabases" "1"
 set_config_int "$ETC_DIR/worldserver.conf" "Updates.AutoSetup" "1"
 
@@ -106,7 +106,7 @@ while ! mysqladmin ping -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" --silent 2>/dev/n
 done
 echo "  ✓ Database is reachable"
 
-# --- 7. PREPARE DATABASE (ONLY create_mysql.sql + TDB files) ---
+# --- 7. PREPARE DATABASE (Following TrinityCore Official Documentation) ---
 echo "[6/7] Preparing database..."
 
 # Check if auth database has the account table (sign of completed setup)
@@ -117,55 +117,95 @@ TABLE_EXISTS=$(mysql -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" -sN -e \
 if [ "$TABLE_EXISTS" = "0" ]; then
     echo "  → First-time setup detected"
     
-    # 1. Create database users and empty databases (as per TrinityCore documentation)
+    # STEP 1: Create users and empty databases using create_mysql.sql
+    # (As per TrinityCore docs: "only the file creating users")
     if [ -f "$SQL_DIR/create/create_mysql.sql" ]; then
-        echo "  → Creating database structures..."
-        mysql -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" < "$SQL_DIR/create/create_mysql.sql" 2>&1 | grep -v "Warning" || true
+        echo "  → Running create_mysql.sql (creating users & databases)..."
+        
+        # Fix: Replace 'localhost' with '%' for Docker compatibility
+        sed "s/'trinity'@'localhost'/'trinity'@'%'/g" "$SQL_DIR/create/create_mysql.sql" | \
+        mysql -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" 2>&1 | grep -E "(ERROR|Warning)" || true
+        
         echo "  ✓ Database structures created"
+    else
+        echo "  ✗ create_mysql.sql not found!"
+        exit 1
     fi
     
-    # 2. Download TDB files to BIN directory (as per TrinityCore documentation)
-    echo "  → Downloading TDB files to ${BIN_DIR}..."
-    API_RESPONSE=$(curl -s https://api.github.com/repos/TrinityCore/TrinityCore/releases/latest 2>/dev/null || echo "{}")
+    # STEP 2: Download, EXTRACT and COPY TDB SQL files to /bin directory
+    # (As per TrinityCore docs: "From the unpacked 7z folder copy the SQL files")
+    echo "  → Preparing TDB files..."
     
-    if echo "$API_RESPONSE" | jq -e . >/dev/null 2>&1; then
-        # Get World TDB
-        LATEST_TDB=$(echo "$API_RESPONSE" | jq -r \
-            '.assets[] | select(.name | startswith("TDB_full_world_") and (.name | contains("335") | not)) | .browser_download_url' \
-            | head -1)
+    # Check if TDB SQL files already exist in /bin
+    TDB_WORLD_SQL=$(find "$BIN_DIR" -name "TDB_full_world_*.sql" 2>/dev/null | head -1)
+    TDB_HOTFIX_SQL=$(find "$BIN_DIR" -name "TDB_full_hotfixes_*.sql" 2>/dev/null | head -1)
+    
+    if [ -z "$TDB_WORLD_SQL" ] || [ -z "$TDB_HOTFIX_SQL" ]; then
+        echo "  → Downloading and extracting TDB files..."
         
-        # Get Hotfixes TDB
-        LATEST_HOTFIX=$(echo "$API_RESPONSE" | jq -r \
-            '.assets[] | select(.name | startswith("TDB_full_hotfixes_")) | .browser_download_url' \
-            | head -1)
+        # Try to fetch from GitHub API
+        API_RESPONSE=$(curl -s --max-time 10 https://api.github.com/repos/TrinityCore/TrinityCore/releases/latest 2>/dev/null || echo '{"error": "timeout"}')
         
-        if [ -n "$LATEST_TDB" ] && [ "$LATEST_TDB" != "null" ]; then
-            TDB_NAME=$(basename "$LATEST_TDB")
-            if [ ! -f "${BIN_DIR}/${TDB_NAME}" ]; then
-                echo "  → Downloading ${TDB_NAME}..."
-                curl -L -o "${BIN_DIR}/${TDB_NAME}" "$LATEST_TDB" 2>/dev/null
-                echo "  ✓ World TDB downloaded"
-            else
-                echo "  ✓ World TDB already exists"
+        if echo "$API_RESPONSE" | jq -e '.assets' >/dev/null 2>&1; then
+            # Get World TDB URL
+            LATEST_TDB=$(echo "$API_RESPONSE" | jq -r '.assets[] | select(.name | startswith("TDB_full_world_") and (.name | contains("335") | not)) | .browser_download_url' 2>/dev/null | head -1)
+            
+            # Get Hotfixes TDB URL
+            LATEST_HOTFIX=$(echo "$API_RESPONSE" | jq -r '.assets[] | select(.name | startswith("TDB_full_hotfixes_")) | .browser_download_url' 2>/dev/null | head -1)
+            
+            # Download and extract World TDB
+            if [ -n "$LATEST_TDB" ] && [ "$LATEST_TDB" != "null" ]; then
+                echo "  → Downloading World TDB..."
+                TDB_NAME=$(basename "$LATEST_TDB")
+                
+                if curl -L --max-time 600 -o "/tmp/${TDB_NAME}" "$LATEST_TDB" 2>/dev/null; then
+                    echo "  → Extracting World TDB..."
+                    7z e "/tmp/${TDB_NAME}" -o"$BIN_DIR" -y >/dev/null 2>&1
+                    rm -f "/tmp/${TDB_NAME}"
+                    echo "  ✓ World TDB extracted to ${BIN_DIR}"
+                else
+                    echo "  ⚠ World TDB download failed"
+                fi
             fi
-        fi
-        
-        if [ -n "$LATEST_HOTFIX" ] && [ "$LATEST_HOTFIX" != "null" ]; then
-            HOTFIX_NAME=$(basename "$LATEST_HOTFIX")
-            if [ ! -f "${BIN_DIR}/${HOTFIX_NAME}" ]; then
-                echo "  → Downloading ${HOTFIX_NAME}..."
-                curl -L -o "${BIN_DIR}/${HOTFIX_NAME}" "$LATEST_HOTFIX" 2>/dev/null
-                echo "  ✓ Hotfixes TDB downloaded"
-            else
-                echo "  ✓ Hotfixes TDB already exists"
+            
+            # Download and extract Hotfixes TDB
+            if [ -n "$LATEST_HOTFIX" ] && [ "$LATEST_HOTFIX" != "null" ]; then
+                echo "  → Downloading Hotfixes TDB..."
+                HOTFIX_NAME=$(basename "$LATEST_HOTFIX")
+                
+                if curl -L --max-time 600 -o "/tmp/${HOTFIX_NAME}" "$LATEST_HOTFIX" 2>/dev/null; then
+                    echo "  → Extracting Hotfixes TDB..."
+                    7z e "/tmp/${HOTFIX_NAME}" -o"$BIN_DIR" -y >/dev/null 2>&1
+                    rm -f "/tmp/${HOTFIX_NAME}"
+                    echo "  ✓ Hotfixes TDB extracted to ${BIN_DIR}"
+                else
+                    echo "  ⚠ Hotfixes TDB download failed"
+                fi
             fi
+        else
+            echo "  ⚠ Could not fetch TDB from GitHub (API rate limit or network issue)"
+            echo ""
+            echo "  MANUAL SETUP REQUIRED:"
+            echo "  1. Download TDB files from: https://github.com/TrinityCore/TrinityCore/releases/latest"
+            echo "  2. Look for: TDB_full_world_11XX_*.7z and TDB_full_hotfixes_11XX_*.7z"
+            echo "  3. Extract the .7z files"
+            echo "  4. Copy the .sql files (NOT the .7z!) to: ${BIN_DIR}/"
+            echo "  5. Restart the worldserver container"
+            echo ""
         fi
+    else
+        echo "  ✓ TDB SQL files already exist in ${BIN_DIR}"
     fi
     
     echo "  ✓ Database preparation complete"
     echo ""
-    echo "  NOTE: Worldserver will now start and ask if you want to create databases."
-    echo "        The auto-setup is ENABLED, so it will import automatically."
+    echo "  ==================================================================="
+    echo "  IMPORTANT: Worldserver will now start and ask:"
+    echo "  'Do you want to create the database? [yes (default) / no]:"
+    echo ""
+    echo "  The auto-setup is ENABLED (Updates.AutoSetup = 1)"
+    echo "  Worldserver will automatically import the TDB SQL files from /bin"
+    echo "  ==================================================================="
     echo ""
 else
     echo "  ✓ Databases already populated (auth.account exists)"
