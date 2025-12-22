@@ -4,7 +4,6 @@ FROM ubuntu:24.04 AS builder
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install dependencies
-# Matches linux-build.yml logic + Docker specifics
 RUN apt-get update && apt-get install -y \
     git clang cmake make gcc g++ \
     libmariadb-dev libssl-dev \
@@ -22,7 +21,6 @@ RUN git clone -b master --depth 1 https://github.com/TrinityCore/TrinityCore.git
 WORKDIR /usr/src/TrinityCore/build
 
 # Configure CMake
-# Aligned with linux-build.yml settings (Ninja, PCH, Jemalloc)
 RUN cmake ../ -DCMAKE_INSTALL_PREFIX=/opt/trinitycore \
     -DCMAKE_C_COMPILER=clang \
     -DCMAKE_CXX_COMPILER=clang++ \
@@ -49,7 +47,6 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install runtime dependencies
-# CRITICAL FIX: Added comprehensive list of Boost runtime libraries to prevent "shared object not found" errors
 RUN apt-get update && apt-get install -y \
     libmariadb3 \
     libssl3t64 \
@@ -81,6 +78,7 @@ COPY --from=builder /opt/trinitycore /opt/trinitycore
 RUN mkdir -p /opt/trinitycore/etc-backup && \
     cp -r /opt/trinitycore/etc/* /opt/trinitycore/etc-backup/
 
+# Copy the entrypoint script
 COPY scripts/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
@@ -88,9 +86,7 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 RUN groupadd -r trinity && useradd -r -g trinity trinity
 RUN chown -R trinity:trinity /opt/trinitycore
 
-# --- FIX: SYMLINK FÜR DB-UPDATER ---
-# Erstellt den Ordner /usr/src und verlinkt TrinityCore dorthin,
-# damit der Server seine SQL-Dateien am "alten" Ort findet.
+# --- FIX: SYMLINK FOR DB-UPDATER ---
 RUN mkdir -p /usr/src && ln -s /opt/trinitycore /usr/src/TrinityCore
 
 EXPOSE 3724 8085
