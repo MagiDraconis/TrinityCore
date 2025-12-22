@@ -42,6 +42,21 @@ RUN ninja install \
 # Copy SQL files
 RUN cp -r /usr/src/TrinityCore/sql /opt/trinitycore/sql
 
+# --- CRITICAL: Download and extract TDB files (as per TrinityCore docs) ---
+# The docs say: "copy the SQL files to the directory where your worldserver binary is"
+# We do this during build to avoid runtime GitHub API rate limits
+WORKDIR /opt/trinitycore/bin
+
+# Get latest TDB release info and download
+# Note: Using a specific release to ensure reproducible builds
+RUN curl -L -o /tmp/world.7z \
+    "https://github.com/TrinityCore/TrinityCore/releases/download/TDB2413.24121/TDB_full_world_2413.24121_2024_12_21.7z" && \
+    curl -L -o /tmp/hotfix.7z \
+    "https://github.com/TrinityCore/TrinityCore/releases/download/TDB2413.24121/TDB_full_hotfixes_2413.24121_2024_12_21.7z" && \
+    7z e /tmp/world.7z -o/opt/trinitycore/bin -y && \
+    7z e /tmp/hotfix.7z -o/opt/trinitycore/bin -y && \
+    rm -f /tmp/world.7z /tmp/hotfix.7z
+
 
 # --- Stage 2: Runtime ---
 FROM ubuntu:24.04
@@ -74,7 +89,7 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /opt/trinitycore
 
-# Copy compiled files
+# Copy compiled files (including TDB SQL files in /bin)
 COPY --from=builder /opt/trinitycore /opt/trinitycore
 
 # Backup config files
@@ -88,9 +103,7 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 RUN groupadd -r trinity && useradd -r -g trinity trinity
 RUN chown -R trinity:trinity /opt/trinitycore
 
-# --- FIX: SYMLINK FÜR DB-UPDATER ---
-# Erstellt den Ordner /usr/src und verlinkt TrinityCore dorthin,
-# damit der Server seine SQL-Dateien am "alten" Ort findet.
+# Symlink for DB updater (worldserver expects source at /usr/src/TrinityCore)
 RUN mkdir -p /usr/src && ln -s /opt/trinitycore /usr/src/TrinityCore
 
 EXPOSE 3724 8085
