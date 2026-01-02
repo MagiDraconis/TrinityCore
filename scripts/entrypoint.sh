@@ -3,9 +3,7 @@ set -e
 
 BIN_DIR="/opt/trinitycore/bin"
 ETC_DIR="/opt/trinitycore/etc"
-# Hier mounten wir deine lokalen Dateien hin:
 LOCAL_TDB_DIR="/opt/trinitycore/bin/custom_tdb" 
-
 SQL_DIR="/opt/trinitycore/sql"
 DATA_DIR="/opt/trinitycore/data"
 
@@ -15,7 +13,8 @@ DB_USER=${DB_USER:-"root"}
 DB_PASS=${DB_PASS:-"trinity"}
 
 echo "=========================================="
-echo " TrinityCore MASTER Entrypoint (Offline Mode)"
+echo " TrinityCore MASTER Entrypoint"
+echo " Mode: $1"
 echo "=========================================="
 
 # --- 1. CONFIG & SSL ---
@@ -48,47 +47,59 @@ set_config_int "$ETC_DIR/worldserver.conf" "Updates.EnableDatabases" "1"
 set_config_int "$ETC_DIR/worldserver.conf" "Updates.AutoSetup" "1"
 
 # --- 3. WAIT FOR DB ---
-echo "Waiting for database..."
+echo "[Shared] Waiting for database..."
 while ! mysqladmin ping -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" --silent 2>/dev/null; do sleep 2; done
 
-# --- 4. PREPARE DB FILES ---
-# Check ob wir schon installiert haben
-TABLE_EXISTS=$(mysql -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" -sN -e "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'auth' AND TABLE_NAME = 'account';" 2>/dev/null || echo "0")
+# =================================================================
+#  EXCLUSIVE SETUP: ONLY WORLDSERVER DOES THIS
+# =================================================================
+if [ "$1" = "world" ]; then
+    
+    echo "[World-Only] Checking installation status..."
+    
+    # 1. FIX PERMISSIONS (Der Hammer Methode)
+    # Wir erzwingen die Rechte, egal ob der User schon existiert oder nicht.
+    echo "  -> Forcing Permissions Update for 'trinity'@'%'..."
+    mysql -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" -e "GRANT ALL PRIVILEGES ON *.* TO 'trinity'@'%' IDENTIFIED BY 'trinity' WITH GRANT OPTION; FLUSH PRIVILEGES;" || echo "Warning: Grant failed, check root pass"
 
-if [ "$TABLE_EXISTS" = "0" ]; then
-    echo "→ First run detected."
-
-    # A) User erstellen (mit FORCE, falls er schon existiert)
+    # 2. CREATE DATABASES (Shells)
+    # Wir erstellen die DBs, falls sie fehlen. Fehler (existiert schon) werden ignoriert.
     if [ -f "$SQL_DIR/create/create_mysql.sql" ]; then
-        echo "→ Creating users..."
-        sed "s/'trinity'@'localhost'/'trinity'@'%'/g" "$SQL_DIR/create/create_mysql.sql" | \
+        echo "  -> Ensuring DBs exist..."
+        # Wir entfernen CREATE USER aus dem Skript, da wir das oben manuell gemacht haben!
+        # Das verhindert den Fehlerabbruch.
+        grep -v "CREATE USER" "$SQL_DIR/create/create_mysql.sql" | \
+        sed "s/'trinity'@'localhost'/'trinity'@'%'/g" | \
         mysql -f -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" 2>&1 | grep -v "Warning" || true
     fi
 
-    # B) TDB Kopieren (Vom gemounteten Ordner in den Bin-Ordner)
-    echo "→ Checking for local TDB files in $LOCAL_TDB_DIR..."
-    
-    # Wir suchen nach SQL Dateien im gemounteten Ordner
+    # 3. COPY TDB FILES
+    echo "  -> Checking for local TDB files in $LOCAL_TDB_DIR..."
     FOUND_SQL=$(find "$LOCAL_TDB_DIR" -name "TDB_full_*.sql" 2>/dev/null)
     
     if [ -n "$FOUND_SQL" ]; then
-        echo "✓ Found TDB files. Copying to binary directory..."
-        cp $LOCAL_TDB_DIR/TDB_full_*.sql "$BIN_DIR/"
-        echo "✓ Files ready for AutoSetup."
+        echo "  -> Copying TDB files to binary directory..."
+        cp -n $LOCAL_TDB_DIR/TDB_full_*.sql "$BIN_DIR/" || true
+        echo "  -> Files ready for AutoSetup."
     else
-        echo "⚠ WARNING: No TDB files found in $LOCAL_TDB_DIR!"
-        echo "⚠ Please download the TDB .sql files and place them in D:\docker\trinity\tdb"
+        echo "  WARN: No TDB files found in $LOCAL_TDB_DIR! Server might fail to install."
     fi
-else
-    echo "✓ Database already populated."
-fi
 
-# --- 5. REALM ---
-if [ "$1" = "bnetserver" ] || [ "$1" = "auth" ]; then
+    # 4. REALM IP
     REALM_IP=${TRINITY_REALM_IP:-"127.0.0.1"}
     mysql -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" auth -e "UPDATE realmlist SET address = '$REALM_IP' WHERE id = 1;" 2>/dev/null || true
     mysql -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" auth -e "INSERT IGNORE INTO realmlist (id, name, address, port, icon, flag, timezone, allowedSecurityLevel, population, gamebuild) VALUES (1, 'Trinity Master Docker', '$REALM_IP', 8085, 0, 0, 1, 0, 0, 57388);" 2>/dev/null || true
+
+else
+    echo "[Auth-Only] Skipping DB setup tasks."
 fi
 
-echo "Starting $1..."
-if [ "$1" = "auth" ] || [ "$1" = "bnetserver" ]; then exec "$BIN_DIR/bnetserver"; elif [ "$1" = "world" ]; then exec "$BIN_DIR/worldserver"; else exec "$@"; fi
+# --- START SERVER ---
+echo "Starting $1 process..."
+if [ "$1" = "auth" ] || [ "$1" = "bnetserver" ]; then 
+    exec "$BIN_DIR/bnetserver"
+elif [ "$1" = "world" ]; then 
+    exec "$BIN_DIR/worldserver"
+else 
+    exec "$@"
+fi
